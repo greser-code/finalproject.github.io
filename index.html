@@ -1,0 +1,620 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Drug Visualization Dashboard — Final</title>
+  <script src="https://d3js.org/d3.v3.min.js"></script>
+  <style>
+    body { font-family: Arial, Helvetica, sans-serif; background: #fafafa; margin: 18px; }
+    h1 { text-align:center; margin-bottom: 6px; }
+    .controls { display:flex; gap:18px; align-items:center; justify-content:center; margin-bottom:12px; flex-wrap:wrap;}
+    .chart-row { display:flex; gap:28px; justify-content:center; align-items:flex-start; flex-wrap:wrap;}
+    .chart-box { background: white; padding:12px; border-radius:6px; box-shadow: 0 1px 4px rgba(0,0,0,0.08); }
+    .axis-label { font-size:13px; font-weight:600; }
+    .tooltip { position: absolute; padding: 8px 10px; background: rgba(0,0,0,0.75); color:#fff; border-radius:4px; pointer-events:none; font-size:13px; }
+    .legend { max-height: 240px; overflow-y:auto; padding:6px; border: 1px solid #eee; border-radius:6px; background:#fff;}
+    .legend-item { cursor:pointer; display:flex; align-items:center; gap:8px; margin:6px 2px; user-select:none; }
+    .legend-swatch { width:14px; height:14px; border-radius:2px; box-shadow: 0 0 0 1px rgba(0,0,0,0.05) inset; }
+    .btn { cursor:pointer; padding:6px 10px; border-radius:4px; border:1px solid #ddd; background:#f4f4f4; margin-right:6px; }
+    .btn.active { background:#dfefff; border-color:#b5d7ff; }
+    .bar { fill: steelblue; cursor:pointer; }
+    .bar:hover { fill: orange; }
+    rect.highlight { fill: yellow !important; }
+    circle { opacity: 0.85; cursor:pointer; stroke: #333; stroke-width: 0.2; }
+    circle.inactive { opacity: 0.06; }
+	circle.highlighted { stroke: yellow; stroke-width: 3px; }
+	circle.hover { stroke: #333; stroke-width: 1.2px; }
+	circle { stroke: none; }
+    .brush .extent { fill-opacity: 0.15; stroke: none; }
+  </style>
+</head>
+<body>
+
+<h1>Drug Dataset Visualization Dashboard</h1>
+
+<div class="controls">
+  <div>
+    <strong>Sex filter:</strong>
+    <button id="btn-all" class="btn active">All</button>
+    <button id="btn-male" class="btn">Male</button>
+    <button id="btn-female" class="btn">Female</button>
+  </div>
+
+<div style="margin-top:10px;">
+	<label><b>Filter by Condition:</b></label>
+  <select id="condition-filter">
+    <option value="All">All</option>
+  </select>
+</div>
+
+<button id="reset-filters" style="margin-top:10px;">Reset All Filters</button>
+
+  <div>
+    <strong>Age range (brush on histogram below):</strong>
+    <span id="age-range-display">All</span>
+  </div>
+
+  <div>
+    <strong>Legend (click to toggle drug):</strong>
+    <div id="drug-legend" class="legend" style="display:inline-block; margin-left:8px; width:360px;"></div>
+  </div>
+</div>
+
+<!-- Tooltip -->
+<div id="tooltip" class="tooltip" style="opacity:0;"></div>
+
+<div class="chart-row">
+  <!-- Left column: scatter & age histogram -->
+  <div class="chart-box" style="width:820px;">
+    <h3 style="margin-top:6px; margin-bottom:6px; text-align:center;">Dosage vs Improvement</h3>
+
+    <svg id="scatter" width="780" height="380"></svg>
+
+    <div style="margin-top:14px;">
+      <h4 style="margin:6px 0;">Age distribution — drag to select age range</h4>
+      <svg id="age-hist" width="760" height="200"></svg>
+    </div>
+  </div>
+
+  <!-- Right column: two bar charts -->
+  <div style="display:flex; flex-direction:column; gap:18px;">
+    <div class="chart-box" style="width:520px;">
+      <h3 style="margin-top:6px; margin-bottom:6px; text-align:center;">Mean Clinical Improvement by Drug</h3>
+      <svg id="bar1" width="480" height="220"></svg>
+    </div>
+
+    <div class="chart-box" style="width:520px;">
+      <h3 style="margin-top:6px; margin-bottom:6px; text-align:center;">Frequency of Unique Side Effects by Drug</h3>
+      <!-- slimmer bar chart (narrower width) -->
+      <svg id="bar2" width="480" height="320"></svg>
+    </div>
+  </div>
+</div>
+
+<script>
+d3.csv("real_drug_dataset.csv", function(raw) {
+
+  // ---------------------------
+  // Preprocess & normalize columns
+  // ---------------------------
+  var data = raw.map(function(d){
+    var gRaw = (d.Gender || d.Sex || "").toString().trim();
+    var G = "Other";
+    if (gRaw.length > 0) {
+      var gl = gRaw.toLowerCase();
+      if (gl.indexOf('m') === 0) G = "Male";
+      else if (gl.indexOf('f') === 0) G = "Female";
+      else G = gRaw;
+    }
+
+    return {
+      Patient_ID: d.Patient_ID,
+      Age: isNaN(+d.Age) ? null : +d.Age,
+      Gender: G,
+      Condition: d.Condition,
+      Drug_Name: d.Drug_Name,
+      Dosage_mg: isNaN(+d.Dosage_mg) ? null : +d.Dosage_mg,
+      Treatment_Duration_days: isNaN(+d.Treatment_Duration_days) ? 0 : +d.Treatment_Duration_days,
+      Side_Effects: (d.Side_Effects || "").toString().trim(),
+      Side_Effects_norm: (d.Side_Effects || "").toString().trim().toLowerCase(),
+      Improvement_Score: isNaN(+d.Improvement_Score) ? null : +d.Improvement_Score
+    };
+  });
+
+  // Remove rows that cannot be used for scatter (but keep them for side-effect counts)
+  // (getFilteredData will filter appropriately later)
+  var allDrugs = d3.set(data.map(function(d){ return d.Drug_Name; })).values().sort();
+
+  // color for drug legend & bar charts (unchanged)
+  var color = d3.scale.category20().domain(allDrugs);
+
+  // gender color scale (scatter fill)
+  var genderColor = d3.scale.ordinal()
+      .domain(["Male","Female"])
+      .range(["lightblue","lightcoral"]);
+
+  // size scale for treatment duration
+  var durExtent = d3.extent(data, function(d){ return d.Treatment_Duration_days; });
+  if (durExtent[0] === durExtent[1]) durExtent = [durExtent[0] || 0, (durExtent[1] || 1) + 1];
+  var sizeScale = d3.scale.sqrt().domain(durExtent).range([3,14]);
+
+  // filter state
+  var activeSex = "All";
+  var ageRange = null;
+  var drugVisible = {};
+  allDrugs.forEach(function(d){ drugVisible[d] = true; });
+
+  var tooltip = d3.select("#tooltip");
+
+  // ---------------------------
+  // Utility: filtered dataset according to current filters
+  // ---------------------------
+  function getFilteredDataForScatter() {
+    return data.filter(function(d){
+      // need numeric fields for scatter
+      if (d.Improvement_Score === null || d.Dosage_mg === null) return false;
+      if (activeSex !== "All" && d.Gender !== activeSex) return false;
+	  if (activeCondition !== "All" && d.Condition !== activeCondition) return false;
+      if (ageRange && (d.Age === null || d.Age < ageRange[0] || d.Age > ageRange[1])) return false;
+      if (!drugVisible[d.Drug_Name]) return false;
+      return true;
+    });
+  }
+
+  // ---------------------------
+  // DOM / SVG setup (matching your HTML)
+  // ---------------------------
+  // Scatter
+  var sMargin = {top:18,right:18,bottom:36,left:56},
+      sW = 780 - sMargin.left - sMargin.right,
+      sH = 380 - sMargin.top - sMargin.bottom;
+
+  var svgS = d3.select("#scatter");
+  svgS.selectAll("*").remove();
+  var gS = svgS.append("g").attr("transform","translate("+sMargin.left+","+sMargin.top+")");
+
+  var xS = d3.scale.linear().range([0, sW]);
+  var yS = d3.scale.linear().range([sH, 0]);
+  var xAxisS = d3.svg.axis().scale(xS).orient("bottom");
+  var yAxisS = d3.svg.axis().scale(yS).orient("left");
+
+  gS.append("g").attr("class","x axis").attr("transform","translate(0,"+sH+")");
+  gS.append("g").attr("class","y axis");
+  gS.append("text").attr("class","axis-label").attr("x", sW/2).attr("y", sH+32).style("text-anchor","middle").text("Improvement Score");
+  gS.append("text").attr("class","axis-label").attr("transform","rotate(-90)").attr("x",-sH/2).attr("y",-42).style("text-anchor","middle").text("Dosage (mg)");
+
+  var pointsG = gS.append("g").attr("class","points");
+
+// Build condition list
+var allConditions = d3.set(data.map(function(d){ return d.Condition; })).values().sort();
+
+// Populate dropdown
+var condSel = d3.select("#condition-filter");
+allConditions.forEach(function(c){
+  condSel.append("option").attr("value", c).text(c);
+});
+
+// Filter state
+var activeCondition = "All";
+
+// Handler
+condSel.on("change", function(){
+  activeCondition = this.value;
+  updateAll();
+});
+
+// RESET ALL FILTERS BUTTON
+d3.select("#reset-filters").on("click", function(){
+  // Reset filter states
+  activeSex = "All";
+  activeCondition = "All";
+  ageRange = null;
+
+  // Reset UI
+  d3.select("#btn-all").classed("active", true);
+  d3.select("#btn-male").classed("active", false);
+  d3.select("#btn-female").classed("active", false);
+
+  d3.select("#condition-filter").property("value", "All");
+
+  // Clear age brush
+  gH.select(".brush").call(brush.clear());
+
+  // Re-enable all drugs (reset legend)
+  for (var k in drugVisible) drugVisible[k] = true;
+  d3.selectAll("#drug-legend .legend-item").style("opacity", 1);
+
+  // Update charts
+  updateAll();
+});
+
+  // Age histogram + brush
+  var hMargin = {top:30,right:12,bottom:20,left:36},
+      hW = 760 - hMargin.left - hMargin.right,
+      hH = 190 - hMargin.top - hMargin.bottom;
+
+  var svgH = d3.select("#age-hist");
+  svgH.selectAll("*").remove();
+  var gH = svgH.append("g").attr("transform","translate("+hMargin.left+","+hMargin.top+")");
+
+  var xH = d3.scale.linear().range([0,hW]);
+  var yH = d3.scale.linear().range([hH,0]);
+
+  gH.append("g").attr("class","x axis").attr("transform","translate(0,"+hH+")");
+  var histBarsG = gH.append("g").attr("class","histbars");
+
+  var brush = d3.svg.brush().x(xH).on("brushend", brushended);
+  var brushG = gH.append("g").attr("class","brush").call(brush);
+  brushG.selectAll("rect").attr("height", hH);
+
+  // Bar1 (mean improvement)
+  var b1Margin = {top:28,right:12,bottom:80,left:56},
+      b1W = 480 - b1Margin.left - b1Margin.right,
+      b1H = 220 - b1Margin.top - b1Margin.bottom;
+
+  var svg1 = d3.select("#bar1");
+  svg1.selectAll("*").remove();
+  var g1 = svg1.append("g").attr("transform","translate("+b1Margin.left+","+b1Margin.top+")");
+  var x1 = d3.scale.ordinal().rangeRoundBands([0,b1W],0.15);
+  var y1 = d3.scale.linear().range([b1H,0]);
+  g1.append("g").attr("class","x axis").attr("transform","translate(0,"+b1H+")");
+  g1.append("g").attr("class","y axis");
+
+  // Bar2 (unique side effects)
+  var b2Margin = {top:28,right:18,bottom:20,left:120},
+      b2W = 480 - b2Margin.left - b2Margin.right,
+      b2H = 320 - b2Margin.top - b2Margin.bottom;
+
+  var svg2 = d3.select("#bar2");
+  svg2.selectAll("*").remove();
+  var g2 = svg2.append("g").attr("transform","translate("+b2Margin.left+","+b2Margin.top+")");
+  var x2 = d3.scale.linear().range([0,b2W * 0.70]);
+  var y2 = d3.scale.ordinal().rangeRoundBands([0,b2H],0.12);
+  g2.append("g").attr("class","x axis").attr("transform","translate(0,0)");
+  g2.append("g").attr("class","y axis");
+
+  // ---------------------------
+  // Legend builder (drug color legend)
+  // ---------------------------
+  function buildLegend() {
+    var legend = d3.select("#drug-legend");
+    legend.selectAll("*").remove();
+    var items = legend.selectAll(".legend-item").data(allDrugs);
+    var enter = items.enter().append("div").attr("class","legend-item")
+      .on("click", function(d){
+        drugVisible[d] = !drugVisible[d];
+        d3.select(this).style("opacity", drugVisible[d] ? 1 : 0.25);
+        updateAll();
+      });
+
+    enter.append("div").attr("class","legend-swatch")
+      .style("background", function(d){ return color(d); });
+
+    enter.append("div").text(function(d){ return d; }).style("font-size","13px");
+  }
+
+  // ---------------------------
+  // Main update function — updates all visuals
+  // ---------------------------
+  function updateAll() {
+    // FILTERED DATA (used by scatter and bars that are filter-responsive)
+    var filtered = getFilteredDataForScatter();
+
+    // --- SCATTER DOMAINS ---
+    var impExtent = d3.extent(filtered, function(d){ return d.Improvement_Score; });
+    var doseExtent = d3.extent(filtered, function(d){ return d.Dosage_mg; });
+
+    if (filtered.length === 0) {
+      // fallback to full extents so axes don't collapse
+      impExtent = d3.extent(data.filter(function(d){ return d.Improvement_Score !== null; }), function(d){ return d.Improvement_Score; });
+      doseExtent = d3.extent(data.filter(function(d){ return d.Dosage_mg !== null; }), function(d){ return d.Dosage_mg; });
+    }
+
+    if (!impExtent || impExtent[0] === undefined) impExtent = [0,10];
+    if (!doseExtent || doseExtent[0] === undefined) doseExtent = [0, d3.max(data, function(d){ return d.Dosage_mg; }) || 100];
+
+    var impPad = (impExtent[1] - impExtent[0]) * 0.06;
+    if (impPad === 0) impPad = 1;
+    xS.domain([Math.floor(impExtent[0]-impPad), Math.ceil(impExtent[1]+impPad)]);
+
+    var dosePad = (doseExtent[1] - doseExtent[0]) * 0.06;
+    if (dosePad === 0) dosePad = 1;
+    yS.domain([Math.max(0, Math.floor(doseExtent[0]-dosePad)), Math.ceil(doseExtent[1]+dosePad)]);
+
+    gS.select(".x.axis").call(xAxisS);
+    gS.select(".y.axis").call(yAxisS);
+
+    // --- SCATTER JOIN ---
+    var pts = pointsG.selectAll("circle").data(filtered, function(d){ return d.Patient_ID; });
+
+    // EXIT
+    pts.exit().transition().duration(220).attr("r",0).remove();
+
+    // UPDATE (apply classed & styles on selection, then transition numeric attrs)
+	pts
+		.classed("hover", false)     // OK
+		// do NOT touch highlighted here
+		.style("fill", function(d){ return genderColor(d.Gender); })
+		.transition().duration(300)
+		.attr("cx", function(d){ return xS(d.Improvement_Score); })
+		.attr("cy", function(d){ return yS(d.Dosage_mg); })
+		.attr("r", function(d){ return sizeScale(d.Treatment_Duration_days); });
+
+    // ENTER
+    var ptsEnter = pts.enter().append("circle")
+        .style("fill", function(d){ return genderColor(d.Gender); })
+        .attr("cx", function(d){ return xS(d.Improvement_Score); })
+        .attr("cy", function(d){ return yS(d.Dosage_mg); })
+        .attr("r", 0)
+		.on("mouseover", function(d){
+			tooltip.style("opacity",1)
+			.html(
+				"<b>" + d.Drug_Name + "</b>" +
+				"<br/>Condition: " + d.Condition +
+				"<br/>Side Effect: " + (d.Side_Effects ? d.Side_Effects : "None listed") +
+				"<br/>Dose: " + d.Dosage_mg + " mg" +
+				"<br/>Improvement: " + (d.Improvement_Score === null ? "N/A" : d.Improvement_Score) +
+				"<br/>Age: " + (d.Age === null ? "N/A" : d.Age) +
+				"<br/>Sex: " + d.Gender +
+				"<br/>Duration (days): " + d.Treatment_Duration_days
+			)
+			  .style("left",(d3.event.pageX+12)+"px")
+			  .style("top",(d3.event.pageY-18)+"px");
+
+			// If this point is not already selected (highlighted), add hover class
+			var sel = d3.select(this);
+			if (!sel.classed("highlighted")) sel.classed("hover", true);
+		})
+		.on("mouseout", function(d){
+			tooltip.style("opacity",0);
+			// remove hover class (do not touch 'highlighted' class)
+			d3.select(this).classed("hover", false);
+		})
+
+		.on("click", function(d){
+          // highlight based on drug clicked
+          highlightDrug(d.Drug_Name);
+        });
+
+    ptsEnter.transition().duration(350).attr("r", function(d){ return sizeScale(d.Treatment_Duration_days); });
+
+    // Ensure points for hidden drugs remain hidden (getFilteredDataForScatter already filters them out,
+    // but be defensive when toggles happen rapidly)
+    pointsG.selectAll("circle").style("opacity", function(d){
+      return drugVisible[d.Drug_Name] ? 0.85 : 0.06;
+    });
+
+    // --- AGE HISTOGRAM ---
+    var ages = data.map(function(d){ return d.Age; }).filter(function(v){ return v !== null && !isNaN(v); });
+    var ageExtent = d3.extent(ages);
+    if (!ageExtent[0] && ageExtent[0] !== 0) ageExtent = [0,90];
+    xH.domain([Math.floor(ageExtent[0]), Math.ceil(ageExtent[1])]);
+
+    var hist = d3.layout.histogram().bins(xH.ticks(20))(ages);
+    yH.domain([0, d3.max(hist, function(d){ return d.y; }) || 1]);
+
+    var hb = histBarsG.selectAll(".hbar").data(hist);
+    hb.exit().remove();
+    var hbEnter = hb.enter().append("g").attr("class","hbar");
+    hbEnter.append("rect");
+    hbEnter.append("text").attr("y", -4).attr("x", 3).style("font-size","10px");
+
+    hb.select("rect")
+      .attr("x", function(d){ return Math.max(0, xH(d.x)); })
+      .attr("y", function(d){ return yH(d.y); })
+      .attr("width", function(d,i){
+         var dx = (hist[i] && hist[i].dx) ? hist[i].dx : (hist[0] && hist[0].dx) || 1;
+         return Math.max(0, xH(d.x + dx) - xH(d.x) - 1);
+      })
+      .attr("height", function(d){ return hH - yH(d.y); })
+      .style("fill", "#bfcde0");
+
+    hb.select("text").text(function(d){ return d.y > 0 ? d.y : ""; })
+      .attr("transform", function(d){ return "translate(" + (xH(d.x) + 2) + "," + (yH(d.y)) + ")"; });
+
+    gH.select(".x.axis").call(d3.svg.axis().scale(xH).orient("bottom"));
+    gH.selectAll(".brush rect").attr("height", hH);
+
+    // --- BAR CHART 1 (mean improvement) ---
+    var agg = d3.nest()
+      .key(function(d){ return d.Drug_Name; })
+      .rollup(function(vals){
+        return {
+          avgImprovement: d3.mean(vals, function(v){ return v.Improvement_Score; }),
+          count: vals.length
+        };
+      })
+      .entries(getFilteredDataForScatter());
+
+    var aggMap = {};
+    agg.forEach(function(d){ aggMap[d.key] = d.values; });
+    var aggArray = allDrugs.map(function(k){
+      return { key: k, avgImprovement: aggMap[k] ? aggMap[k].avgImprovement : 0, count: aggMap[k] ? aggMap[k].count : 0 };
+    });
+
+    x1.domain(allDrugs);
+    var y1Max = d3.max(aggArray, function(d){ return d.avgImprovement; }) || 10;
+    y1.domain([0, y1Max]);
+
+    g1.select(".x.axis").call(d3.svg.axis().scale(x1).orient("bottom"))
+      .selectAll("text").attr("transform","rotate(-35)").style("text-anchor","end");
+    g1.select(".y.axis").call(d3.svg.axis().scale(y1).orient("left"));
+
+    var bars1 = g1.selectAll(".bar1").data(aggArray, function(d){ return d.key; });
+    bars1.exit().remove();
+
+    var bars1Enter = bars1.enter().append("rect").attr("class","bar1 bar")
+      .on("mouseover", function(d){
+        tooltip.style("opacity",1).html("<b>"+d.key+"</b><br/>Avg improvement: "+(d.avgImprovement?d.avgImprovement.toFixed(2):"N/A"))
+          .style("left",(d3.event.pageX+12)+"px").style("top",(d3.event.pageY-18)+"px");
+        d3.select(this).style("fill","orange");
+      })
+      .on("mouseout", function(d){ tooltip.style("opacity",0); d3.select(this).style("fill", color(d.key)); })
+      .on("click", function(d){
+        // maintain previous drug-visible toggle behavior, but also call highlight
+        highlightDrug(d.key);
+      });
+
+    bars1.transition().duration(250)
+      .attr("x", function(d){ return x1(d.key); })
+      .attr("width", x1.rangeBand())
+      .attr("y", function(d){ return y1(d.avgImprovement); })
+      .attr("height", function(d){ return b1H - y1(d.avgImprovement); })
+      .style("fill", function(d){ return color(d.key); })
+      .style("opacity", function(d){ return drugVisible[d.key] ? 1 : 0.18; });
+
+    bars1Enter.transition().duration(350)
+      .attr("x", function(d){ return x1(d.key); })
+      .attr("width", x1.rangeBand())
+      .attr("y", function(d){ return y1(d.avgImprovement); })
+      .attr("height", function(d){ return b1H - y1(d.avgImprovement); })
+      .style("fill", function(d){ return color(d.key); })
+      .style("opacity", function(d){ return drugVisible[d.key] ? 1 : 0.18; });
+
+    // --- BAR CHART 2 (unique side-effects per drug, computed on filtered dataset) ---
+    var sideMap = {};
+    getFilteredDataForScatter().forEach(function(d){
+      var drug = d.Drug_Name;
+      if (!sideMap[drug]) sideMap[drug] = d3.set();
+      if (d.Side_Effects_norm && d.Side_Effects_norm.length > 0) sideMap[drug].add(d.Side_Effects_norm);
+    });
+    var sideArray = allDrugs.map(function(drug){
+		return { 
+			key: drug,
+			uniqueSideEffects: sideMap[drug] ? sideMap[drug].values().length : 0,
+			effects: sideMap[drug] ? sideMap[drug].values() : []
+		};
+	});
+
+    sideArray.sort(function(a,b){ return b.uniqueSideEffects - a.uniqueSideEffects; });
+
+    y2.domain(sideArray.map(function(d){ return d.key; }));
+    x2.domain([0, d3.max(sideArray, function(d){ return d.uniqueSideEffects; }) || 1]);
+
+    g2.select(".x.axis").call(d3.svg.axis().scale(x2).orient("top"));
+    g2.select(".y.axis").call(d3.svg.axis().scale(y2).orient("left"));
+
+    var bars2 = g2.selectAll(".bar2").data(sideArray, function(d){ return d.key; });
+    bars2.exit().remove();
+
+    var bars2Enter = bars2.enter().append("rect").attr("class","bar2 bar")
+      .attr("x", 0)
+      .on("mouseover", function(d){
+		tooltip.style("opacity",1).html(
+			"<b>" + d.key + "</b>" +
+			"<br/>Unique side effects: " + d.uniqueSideEffects +
+			"<br/><b>List:</b> " + (d.effects.length ? d.effects.join(", ") : "None")
+		)
+		.style("left",(d3.event.pageX+12)+"px")
+		.style("top",(d3.event.pageY-18)+"px");
+
+		d3.select(this).style("fill","orange");
+	})
+
+      .on("mouseout", function(d){ tooltip.style("opacity",0); d3.select(this).style("fill", color(d.key)); })
+      .on("click", function(d){ highlightDrug(d.key); });
+
+    bars2.transition().duration(300)
+      .attr("y", function(d){ return y2(d.key); })
+      .attr("height", y2.rangeBand())
+      .attr("width", function(d){ return x2(d.uniqueSideEffects); })
+      .style("fill", function(d){ return color(d.key); })
+      .style("opacity", function(d){ return drugVisible[d.key] ? 1 : 0.18; });
+
+    bars2Enter.transition().duration(400)
+      .attr("y", function(d){ return y2(d.key); })
+      .attr("height", y2.rangeBand())
+      .attr("width", function(d){ return x2(d.uniqueSideEffects); })
+      .style("fill", function(d){ return color(d.key); })
+      .style("opacity", function(d){ return drugVisible[d.key] ? 1 : 0.18; });
+
+    // Update legend opacity
+    d3.selectAll("#drug-legend .legend-item").style("opacity", function(d){ return drugVisible[d] ? 1 : 0.25; });
+
+    // Update age-range display
+    if (!ageRange) d3.select("#age-range-display").text("All");
+    else d3.select("#age-range-display").text(ageRange[0] + " — " + ageRange[1]);
+
+  } // end updateAll
+
+  // ---------------------------
+  // brush handler
+  // ---------------------------
+  function brushended() {
+    var extent = brush.extent();
+    if (extent && extent.length === 2) {
+      ageRange = [Math.round(extent[0]), Math.round(extent[1])];
+      if (Math.abs(ageRange[1] - ageRange[0]) < 1) {
+        ageRange = null;
+        gH.select(".brush").call(brush.clear());
+      }
+    } else {
+      ageRange = null;
+    }
+    updateAll();
+  }
+
+  // ---------------------------
+  // highlight function: set yellow stroke for points of given drug
+  // ---------------------------
+	function highlightDrug(drug) {
+	  // toggle off if already highlighted
+	  var already = false;
+
+	  pointsG.selectAll("circle").each(function(d){
+		if (d.Drug_Name === drug && d3.select(this).classed("highlighted")) {
+			already = true;
+		}
+	  });
+
+	  if (already) {
+		// clear highlight from all points
+		pointsG.selectAll("circle").classed("highlighted", false);
+		d3.selectAll("rect").classed("highlight", false);
+		return;
+	  }
+
+	  // apply highlight to matching points
+	  pointsG.selectAll("circle")
+		.classed("highlighted", function(d){ return d.Drug_Name === drug; });
+
+	  // highlight the bars
+	  d3.selectAll("rect")
+		.classed("highlight", function(d){ return d && d.key === drug; });
+	}
+
+
+  // ---------------------------
+  // Sex filter handlers
+  // ---------------------------
+  function setSexFilter(val) {
+    activeSex = val;
+    d3.selectAll(".btn").classed("active", false);
+    if (val === "All") d3.select("#btn-all").classed("active", true);
+    if (val === "Male") d3.select("#btn-male").classed("active", true);
+    if (val === "Female") d3.select("#btn-female").classed("active", true);
+    updateAll();
+  }
+  d3.select("#btn-all").on("click", function(){ setSexFilter("All"); });
+  d3.select("#btn-male").on("click", function(){ setSexFilter("Male"); });
+  d3.select("#btn-female").on("click", function(){ setSexFilter("Female"); });
+
+  // build legend & initialize
+  buildLegend();
+
+  // init: set age histogram domain and render
+  (function init(){
+    var ages = data.map(function(d){ return d.Age; }).filter(function(v){ return v !== null && !isNaN(v); });
+    var ae = d3.extent(ages);
+    if (!ae[0] && ae[0] !== 0) ae = [0,90];
+    xH.domain([Math.floor(ae[0]), Math.ceil(ae[1])]);
+    updateAll();
+  })();
+  
+
+}); // end csv
+
+</script>
+
+</body>
+</html>
